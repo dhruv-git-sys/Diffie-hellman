@@ -3,10 +3,31 @@ import { AlertTriangle, ArrowDown, ArrowLeftRight, Check, ChevronDown, CircleHel
 import { useEffect, useMemo, useState } from 'react'
 import { calculateExchange, modPow, toDisplay, validateInputs } from './crypto/diffieHellman'
 import './App.css'
+import './mitm.css'
 
 const DEFAULTS = { p: '23', g: '5', a: '6', b: '15' }
 const STEP_COUNT = 4
 const STEPS = { length: STEP_COUNT }
+
+function generateAttackKeys(values) {
+  const prime = BigInt(values.p)
+  const max = Number(prime - 2n)
+  const first = Math.floor(Math.random() * (max - 1)) + 2
+  let second = Math.floor(Math.random() * (max - 1)) + 2
+  if (max > 2 && second === first) second = second === max ? 2 : second + 1
+  return { xD1: BigInt(first), xD2: BigInt(second) }
+}
+
+function calculateMitm(result, keys) {
+  const yD1 = modPow(result.g, keys.xD1, result.p)
+  const yD2 = modPow(result.g, keys.xD2, result.p)
+  const aliceK2 = modPow(yD2, result.a, result.p)
+  const eveK2 = modPow(result.alicePublic, keys.xD2, result.p)
+  const bobK1 = modPow(yD1, result.b, result.p)
+  const eveK1 = modPow(result.bobPublic, keys.xD1, result.p)
+  return { ...keys, yD1, yD2, aliceK2, eveK2, bobK1, eveK1 }
+}
+
 function getSteps(result) {
   return [
   { label: 'Private keys chosen', title: 'Only Alice and Bob know these values.', copy: 'Each participant selects a private number. These values never travel across the channel.', formula: `a = ${result.a}     b = ${result.b}` },
@@ -23,17 +44,15 @@ function App() {
   const [step, setStep] = useState(3)
   const [isPlaying, setIsPlaying] = useState(false)
   const [showAttack, setShowAttack] = useState(false)
+  const [attackStep, setAttackStep] = useState(0)
+  const [attackKeys, setAttackKeys] = useState(() => generateAttackKeys(DEFAULTS))
   const [quizAnswer, setQuizAnswer] = useState(null)
   const steps = useMemo(() => getSteps(result), [result])
-
-  const eve = useMemo(() => {
-    const privateKey = 7n
-    const publicKey = modPow(result.g, privateKey, result.p)
-    return { privateKey, publicKey, aliceSecret: modPow(publicKey, result.a, result.p), bobSecret: modPow(publicKey, result.b, result.p) }
-  }, [result])
+  const mitm = useMemo(() => calculateMitm(result, attackKeys), [result, attackKeys])
+  const eve = { publicKey: mitm.yD1, aliceSecret: mitm.aliceK2, bobSecret: mitm.bobK1 }
 
   useEffect(() => {
-    if (!isPlaying) return undefined
+    if (!isPlaying || showAttack) return undefined
     const timer = window.setInterval(() => {
       setStep((current) => {
         if (current >= steps.length - 1) { setIsPlaying(false); return current }
@@ -41,7 +60,26 @@ function App() {
       })
     }, 2200)
     return () => window.clearInterval(timer)
-  }, [isPlaying, steps.length])
+  }, [isPlaying, showAttack, steps.length])
+
+  useEffect(() => {
+    if (!showAttack || !isPlaying) return undefined
+    const timer = window.setInterval(() => {
+      setAttackStep((current) => {
+        if (current >= 5) { setIsPlaying(false); return current }
+        return current + 1
+      })
+    }, 2200)
+    return () => window.clearInterval(timer)
+  }, [showAttack, isPlaying])
+
+  useEffect(() => {
+    const resetTimer = window.setTimeout(() => {
+      setAttackStep(0)
+      setIsPlaying(false)
+    }, 0)
+    return () => window.clearTimeout(resetTimer)
+  }, [showAttack])
 
   function updateValue(key, value) {
     setValues((current) => ({ ...current, [key]: value.replace(/[^0-9]/g, '') }))
@@ -53,7 +91,9 @@ function App() {
     setErrors(validation.errors)
     if (Object.keys(validation.errors).length) return
     setResult(calculateExchange(nextValues))
+    setAttackKeys(generateAttackKeys(nextValues))
     setStep(0)
+    setAttackStep(0)
     setIsPlaying(false)
   }
 
@@ -66,11 +106,12 @@ function App() {
   }
 
   function reset() {
-    setValues(DEFAULTS); setResult(calculateExchange(DEFAULTS)); setErrors({}); setStep(3); setIsPlaying(false); setShowAttack(false)
+    setValues(DEFAULTS); setResult(calculateExchange(DEFAULTS)); setAttackKeys(generateAttackKeys(DEFAULTS)); setErrors({}); setStep(3); setAttackStep(0); setIsPlaying(false); setShowAttack(false)
   }
 
   return (
     <main className="app-shell">
+      <AnimatePresence>{showAttack && <MitmSequence result={result} mitm={mitm} step={attackStep} isPlaying={isPlaying} onPlay={() => setIsPlaying((current) => !current)} onNext={() => setAttackStep((current) => Math.min(current + 1, 5))} onPrevious={() => setAttackStep((current) => Math.max(current - 1, 0))} onRestart={() => { setAttackStep(0); setIsPlaying(false) }} />}</AnimatePresence>
       <nav className="topbar"><div className="brand"><span className="brand-mark"><LockKeyhole size={17} /></span><span>Key<span className="accent-text">Shift</span></span><span className="brand-tag">LAB / 01</span></div><div className="topbar-status"><span className="status-dot" /> ENCRYPTION LAB <span className="status-divider" /> <span className="muted">EDUCATIONAL SIMULATOR</span></div></nav>
       <section className="hero-section page-width"><div className="eyebrow"><span className="eyebrow-line" /> PUBLIC-KEY CRYPTOGRAPHY <span className="eyebrow-line" /></div><h1>Make secrets<br /><span>in public.</span></h1><p className="hero-copy">Explore how two people agree on a shared secret over an open channel.<br />No secret key is ever transmitted.</p><div className="hero-meta"><span><Sparkles size={15} /> REAL-TIME MATH</span><span><ShieldCheck size={15} /> BIGINT PRECISION</span><span><Zap size={15} /> INTERACTIVE</span></div></section>
 
@@ -90,6 +131,12 @@ function App() {
       <footer className="footer page-width"><span><LockKeyhole size={14} /> KEYSHIFT LAB</span><span>Diffie–Hellman / Educational build / 2026</span><span className="footer-note">NOT FOR PRODUCTION CRYPTOGRAPHY</span></footer>
     </main>
   )
+}
+
+function MitmSequence({ result, mitm, step, isPlaying, onPlay, onNext, onPrevious, onRestart }) {
+  const visible = (target) => step >= target ? 'visible' : 'hidden'
+  const stepLabels = ['Alice publishes', 'Eve replaces both keys', 'Alice derives K2', 'Bob publishes', 'K1 matches', 'Attack exposed']
+  return <motion.section className="mitm-sequence page-width" initial={{ opacity: 0, y: -16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -16 }}><div className="mitm-topline"><div><span className="section-kicker danger-kicker"><AlertTriangle size={12} /> ATTACK SIMULATION / ACTIVE</span><h2>Man-in-the-middle sequence</h2><p>Watch Eve replace unauthenticated public keys and establish two separate sessions.</p></div><div className="attack-badge"><span className="status-dot danger-dot" /> MITM ACTIVE</div></div><div className="mitm-lifelines"><div className="lifeline-head"><span className="mitm-avatar alice-avatar"><UserRound size={17} /></span><b>ALICE</b><small>initiator</small></div><div className="lifeline-head eve-head"><span className="mitm-avatar eve-avatar"><AlertTriangle size={17} /></span><b>EVE</b><small>attacker</small></div><div className="lifeline-head"><span className="mitm-avatar bob-avatar"><UserRound size={17} /></span><b>BOB</b><small>responder</small></div><div className="lifeline-line" /><div className="lifeline-line eve-line" /><div className="lifeline-line" /><div className={`mitm-message message-one ${visible(0)}`}><span>yA = g^xA mod p</span><b>{result.alicePublic}</b><i className="moving-packet cyan-packet" /></div><div className={`mitm-message message-d1 ${visible(1)}`}><span>Eve → Bob / yD1</span><b>{mitm.yD1}</b><i className="moving-packet purple-packet" /></div><div className={`mitm-message message-d2 ${visible(1)}`}><span>Eve → Alice / yD2</span><b>{mitm.yD2}</b><i className="moving-packet cyan-packet" /></div><div className={`mitm-message message-bob ${visible(3)}`}><span>yB = g^xB mod p</span><b>{result.bobPublic}</b><i className="moving-packet purple-packet" /></div><div className={`mitm-calc calc-k2 ${visible(2)}`}><small>ALICE ↔ EVE / SESSION K2</small><code>K2 = yD2^xA mod p</code><strong>{mitm.aliceK2}</strong><em>{mitm.aliceK2 === mitm.eveK2 ? 'MATCH' : 'MISMATCH'}</em></div><div className={`mitm-calc calc-k1 ${visible(4)}`}><small>EVE ↔ BOB / SESSION K1</small><code>K1 = yD1^xB mod p</code><strong>{mitm.bobK1}</strong><em>{mitm.bobK1 === mitm.eveK1 ? 'MATCH' : 'MISMATCH'}</em></div></div><div className="mitm-key-strip"><span>xA <b>{result.a}</b></span><span>yA <b>{result.alicePublic}</b></span><span>xD1 <b>{mitm.xD1}</b></span><span>xD2 <b>{mitm.xD2}</b></span><span>yD1 <b>{mitm.yD1}</b></span><span>yD2 <b>{mitm.yD2}</b></span><span>xB <b>{result.b}</b></span><span>yB <b>{result.bobPublic}</b></span></div><div className="mitm-progress"><span>STEP {String(step + 1).padStart(2, '0')} / 06</span><div><motion.i animate={{ width: `${((step + 1) / 6) * 100}%` }} /></div><b>{stepLabels[step]}</b></div><div className="mitm-controls"><button className="round-control" onClick={onPlay} title={isPlaying ? 'Pause' : 'Play'}>{isPlaying ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button><button className="round-control" onClick={onPrevious} title="Previous step"><ArrowLeftRight size={16} /></button><button className="round-control" onClick={onNext} title="Next step"><ArrowDown size={16} /></button><button className="round-control" onClick={onRestart} title="Restart"><RotateCcw size={16} /></button><span>Playback controls</span></div><div className={`mitm-warning ${visible(5)}`}><AlertTriangle size={20} /><strong>Alice and Bob believe they are communicating securely, but Eve can intercept the exchange because the public keys are unauthenticated.</strong></div></motion.section>
 }
 
 function Participant({ name, role, icon, accent, privateKey, publicKey, secret }) { return <div className={`participant-card ${accent}`}><div className="participant-top"><div className="avatar">{icon}</div><div><h3>{name}</h3><span>{role}</span></div><span className="participant-lock"><LockKeyhole size={14} /></span></div><div className="participant-values"><div><span>PRIVATE KEY</span><b>{toDisplay(privateKey)}</b></div><div><span>PUBLIC KEY</span><b>{toDisplay(publicKey)}</b></div></div><div className="participant-secret"><span>SHARED SECRET</span><strong>{toDisplay(secret)}</strong></div></div> }
