@@ -2,8 +2,10 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { AlertTriangle, ArrowDown, ArrowLeftRight, Check, ChevronDown, CircleHelp, FlaskConical, KeyRound, LockKeyhole, Pause, Play, RotateCcw, ShieldCheck, Sparkles, Terminal, UserRound, X, Zap } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { calculateExchange, modPow, toDisplay, validateInputs } from './crypto/diffieHellman'
+import { createAuthenticatedExchange, tamperPacket, tamperSignature, verifyExchangePacket } from './crypto/signatures'
 import './App.css'
 import './mitm.css'
+import './auth.css'
 
 const DEFAULTS = { p: '23', g: '5', a: '6', b: '15' }
 const STEP_COUNT = 4
@@ -43,10 +45,13 @@ function App() {
   const [errors, setErrors] = useState({})
   const [step, setStep] = useState(3)
   const [isPlaying, setIsPlaying] = useState(false)
-  const [showAttack, setShowAttack] = useState(false)
+  const [authMode, setAuthMode] = useState('normal')
   const [attackStep, setAttackStep] = useState(0)
   const [attackKeys, setAttackKeys] = useState(() => generateAttackKeys(DEFAULTS))
   const [quizAnswer, setQuizAnswer] = useState(null)
+  const [signatureSession, setSignatureSession] = useState(null)
+  const [signatureTampered, setSignatureTampered] = useState(false)
+  const showAttack = authMode !== 'normal'
   const steps = useMemo(() => getSteps(result), [result])
   const mitm = useMemo(() => calculateMitm(result, attackKeys), [result, attackKeys])
   const eve = { publicKey: mitm.yD1, aliceSecret: mitm.aliceK2, bobSecret: mitm.bobK1 }
@@ -81,6 +86,19 @@ function App() {
     return () => window.clearTimeout(resetTimer)
   }, [showAttack])
 
+  useEffect(() => {
+    let active = true
+    if (authMode !== 'signed') {
+      return () => { active = false }
+    }
+    createAuthenticatedExchange(result).then((session) => {
+      if (active) setSignatureSession({ status: 'ready', ...session })
+    }).catch((error) => {
+      if (active) setSignatureSession({ status: 'error', message: error.message })
+    })
+    return () => { active = false }
+  }, [authMode, result])
+
   function updateValue(key, value) {
     setValues((current) => ({ ...current, [key]: value.replace(/[^0-9]/g, '') }))
     setErrors((current) => ({ ...current, [key]: undefined }))
@@ -92,6 +110,7 @@ function App() {
     if (Object.keys(validation.errors).length) return
     setResult(calculateExchange(nextValues))
     setAttackKeys(generateAttackKeys(nextValues))
+    setSignatureSession(null)
     setStep(0)
     setAttackStep(0)
     setIsPlaying(false)
@@ -106,14 +125,33 @@ function App() {
   }
 
   function reset() {
-    setValues(DEFAULTS); setResult(calculateExchange(DEFAULTS)); setAttackKeys(generateAttackKeys(DEFAULTS)); setErrors({}); setStep(3); setAttackStep(0); setIsPlaying(false); setShowAttack(false)
+    setValues(DEFAULTS); setResult(calculateExchange(DEFAULTS)); setAttackKeys(generateAttackKeys(DEFAULTS)); setSignatureSession(null); setErrors({}); setStep(3); setAttackStep(0); setIsPlaying(false); setAuthMode('normal')
+  }
+
+  function changeAuthMode(nextMode) {
+    setAuthMode(nextMode)
+    setAttackStep(0)
+    setStep(0)
+    setIsPlaying(false)
+    setSignatureTampered(false)
+    setSignatureSession(null)
+  }
+
+  function setShowAttack(updater) {
+    setAuthMode((current) => {
+      const nextAttack = typeof updater === 'function' ? updater(current !== 'normal') : updater
+      return nextAttack ? 'mitm' : 'normal'
+    })
   }
 
   return (
     <main className="app-shell">
-      <AnimatePresence>{showAttack && <MitmSequence result={result} mitm={mitm} step={attackStep} isPlaying={isPlaying} onPlay={() => setIsPlaying((current) => !current)} onNext={() => setAttackStep((current) => Math.min(current + 1, 5))} onPrevious={() => setAttackStep((current) => Math.max(current - 1, 0))} onRestart={() => { setAttackStep(0); setIsPlaying(false) }} />}</AnimatePresence>
+      <AnimatePresence>{authMode === 'mitm' && <MitmSequence result={result} mitm={mitm} step={attackStep} isPlaying={isPlaying} onPlay={() => setIsPlaying((current) => !current)} onNext={() => setAttackStep((current) => Math.min(current + 1, 5))} onPrevious={() => setAttackStep((current) => Math.max(current - 1, 0))} onRestart={() => { setAttackStep(0); setIsPlaying(false) }} />}</AnimatePresence>
+      <AnimatePresence>{authMode === 'signed' && <SignedSequence result={result} session={signatureSession} tampered={signatureTampered} onTamper={() => setSignatureTampered((current) => !current)} />}</AnimatePresence>
       <nav className="topbar"><div className="brand"><span className="brand-mark"><LockKeyhole size={17} /></span><span>Key<span className="accent-text">Shift</span></span><span className="brand-tag">LAB / 01</span></div><div className="topbar-status"><span className="status-dot" /> ENCRYPTION LAB <span className="status-divider" /> <span className="muted">EDUCATIONAL SIMULATOR</span></div></nav>
       <section className="hero-section page-width"><div className="eyebrow"><span className="eyebrow-line" /> PUBLIC-KEY CRYPTOGRAPHY <span className="eyebrow-line" /></div><h1>Make secrets<br /><span>in public.</span></h1><p className="hero-copy">Explore how two people agree on a shared secret over an open channel.<br />No secret key is ever transmitted.</p><div className="hero-meta"><span><Sparkles size={15} /> REAL-TIME MATH</span><span><ShieldCheck size={15} /> BIGINT PRECISION</span><span><Zap size={15} /> INTERACTIVE</span></div></section>
+
+      <ModeSelector mode={authMode} onChange={changeAuthMode} />
 
       <section className="workspace page-width">
         <div className="control-panel glass-panel"><div className="panel-heading"><div><span className="section-kicker">01 / PARAMETERS</span><h2>Set the stage</h2></div><span className="live-pill"><span className="status-dot" /> LIVE</span></div><p className="panel-copy">Choose the public parameters and private keys. Try the example, then make it your own.</p><div className="input-grid">{Object.entries({ p: ['Prime modulus', 'Public', 'e.g. 23'], g: ['Generator', 'Public', 'e.g. 5'], a: ["Alice's private key", 'Secret', 'e.g. 6'], b: ["Bob's private key", 'Secret', 'e.g. 15'] }).map(([key, [label, type, hint]]) => <label className="input-field" key={key}><span className="field-label"><span>{label}</span><span className={type === 'Secret' ? 'secret-label' : 'public-label'}>{type === 'Secret' ? <LockKeyhole size={11} /> : <Sparkles size={11} />}{type}</span></span><span className="input-wrap"><span className="input-symbol">{key}</span><input value={values[key]} placeholder={hint} onChange={(event) => updateValue(key, event.target.value)} /></span>{errors[key] && <span className="field-error"><X size={12} />{errors[key]}</span>}</label>)}</div><div className="control-actions"><button className="primary-button" onClick={() => runSimulation()}><Play size={16} fill="currentColor" /> Run simulation</button><button className="secondary-button" onClick={randomize}><Sparkles size={15} /> Random keys</button><button className="icon-button" onClick={reset} title="Reset parameters"><RotateCcw size={16} /></button></div><div className="education-note"><AlertTriangle size={15} /><span>Small parameters are for education only. Real systems use 2048+ bit primes.</span></div></div>
@@ -131,6 +169,65 @@ function App() {
       <footer className="footer page-width"><span><LockKeyhole size={14} /> KEYSHIFT LAB</span><span>Diffie–Hellman / Educational build / 2026</span><span className="footer-note">NOT FOR PRODUCTION CRYPTOGRAPHY</span></footer>
     </main>
   )
+}
+
+function ModeSelector({ mode, onChange }) {
+  return <section className="mode-selector page-width"><div><span className="section-kicker">AUTHENTICATION LAYER</span><h2>Choose the trust model</h2></div><div className="mode-options"><button className={mode === 'normal' ? 'selected normal-mode' : ''} onClick={() => onChange('normal')}><span>01</span><strong>Normal exchange</strong><small>Unauthenticated DH</small></button><button className={mode === 'mitm' ? 'selected mitm-mode' : ''} onClick={() => onChange('mitm')}><span>02</span><strong>MITM attack</strong><small>Eve replaces keys</small></button><button className={mode === 'signed' ? 'selected signed-mode' : ''} onClick={() => onChange('signed')}><span>03</span><strong>Signature protection</strong><small>Trusted ECDSA keys</small></button></div></section>
+}
+
+function keyPreview(jwk) {
+  if (!jwk) return '—'
+  return `${jwk.x?.slice(0, 10)}…${jwk.y?.slice(-8)}`
+}
+
+function packetPreview(packet) {
+  if (!packet) return '—'
+  return `${packet.signature.slice(0, 16)}…`
+}
+
+function SignedSequence({ result, session, tampered, onTamper }) {
+  const [verification, setVerification] = useState({ alice: false, bob: false, loading: true })
+  const tamperedPackets = useMemo(() => {
+    if (!session || session.status !== 'ready') return null
+    if (!tampered) return session.packets
+    const alicePublic = (BigInt(session.packets.alice.publicKey) % result.p) + 1n
+    return { alice: tamperPacket(session.packets.alice, { publicKey: alicePublic }), bob: tamperSignature(session.packets.bob) }
+  }, [result.p, session, tampered])
+
+  useEffect(() => {
+    let active = true
+    if (!session || session.status !== 'ready') {
+      return () => { active = false }
+    }
+    const nextPackets = tamperedPackets
+    const resetTimer = window.setTimeout(() => setVerification({ alice: false, bob: false, loading: true }), 0)
+    if (!tampered) {
+      const validTimer = window.setTimeout(() => {
+        if (active) setVerification({ ...session.verified, loading: false })
+      }, 10)
+      return () => { active = false; window.clearTimeout(resetTimer); window.clearTimeout(validTimer) }
+    }
+    Promise.all([
+      verifyExchangePacket(nextPackets.alice, session.trustedKeys.alice),
+      verifyExchangePacket(nextPackets.bob, session.trustedKeys.bob),
+    ]).then(([alice, bob]) => {
+      if (active) setVerification({ alice, bob, loading: false })
+    }).catch(() => {
+      if (active) setVerification({ alice: false, bob: false, loading: false, error: true })
+    })
+    return () => { active = false; window.clearTimeout(resetTimer) }
+  }, [tampered, tamperedPackets, session])
+
+  if (!session || session.status === 'loading') return <motion.section className="signed-sequence page-width" initial={{ opacity: 0 }} animate={{ opacity: 1 }}><div className="signed-loading"><ShieldCheck size={22} /><span>Generating trusted P-256 signing identities…</span></div></motion.section>
+  if (session.status === 'error') return <section className="signed-sequence page-width"><div className="signed-loading failed"><AlertTriangle size={22} /><span>{session.message}</span></div></section>
+  const aliceValid = !verification.loading && verification.alice
+  const bobValid = !verification.loading && verification.bob
+  const exchangeAccepted = aliceValid && bobValid
+  return <motion.section className={`signed-sequence page-width ${tampered ? 'tampered-sequence' : ''}`} initial={{ opacity: 0, y: -16 }} animate={{ opacity: 1, y: 0 }}><div className="signed-topline"><div><span className="section-kicker signed-kicker"><ShieldCheck size={13} /> AUTHENTICATED EXCHANGE / ECDSA P-256</span><h2>Sign first. Then derive.</h2><p>Alice and Bob sign their canonical DH packets with trusted verification keys. Eve can see the channel, but cannot forge either identity.</p></div><div className={`auth-badge ${exchangeAccepted ? 'valid' : tampered ? 'invalid' : 'pending'}`}><span>{exchangeAccepted ? '●' : tampered ? '×' : '…'}</span>{exchangeAccepted ? 'AUTHENTICATED' : tampered ? 'MITM DETECTED' : 'VERIFYING'}</div></div><div className="signed-lifelines"><div className="signed-person"><span className="signed-avatar alice-avatar"><UserRound size={17} /></span><b>ALICE</b><small>signs yA</small></div><div className="signed-person eve-signed"><span className="signed-avatar eve-avatar"><AlertTriangle size={17} /></span><b>EVE</b><small>intercepts</small></div><div className="signed-person"><span className="signed-avatar bob-avatar"><UserRound size={17} /></span><b>BOB</b><small>verifies yA</small></div><div className="signed-line alice-signed-line" /><div className="signed-line eve-signed-line" /><div className="signed-line bob-signed-line" /><motion.div className="signed-packet packet-a" animate={{ x: tampered ? [0, 40, 0] : [0, 100, 0] }} transition={{ duration: 2.5, repeat: Infinity }}><LockKeyhole size={12} /> yA + σA</motion.div><motion.div className="signed-packet packet-b" animate={{ x: [0, -100, 0] }} transition={{ duration: 2.5, repeat: Infinity, delay: .8 }}><LockKeyhole size={12} /> yB + σB</motion.div><div className={`verify-card verify-alice ${aliceValid ? 'valid-card' : tampered && !verification.loading ? 'invalid-card' : ''}`}><span>BOB VERIFIES ALICE</span><code>verify(σA, yA, trusted Alice key)</code><strong>{verification.loading ? '…' : aliceValid ? 'VALID SIGNATURE' : 'SIGNATURE VERIFICATION FAILED'}</strong></div><div className={`verify-card verify-bob ${bobValid ? 'valid-card' : tampered && !verification.loading ? 'invalid-card' : ''}`}><span>ALICE VERIFIES BOB</span><code>verify(σB, yB, trusted Bob key)</code><strong>{verification.loading ? '…' : bobValid ? 'VALID SIGNATURE' : 'SIGNATURE VERIFICATION FAILED'}</strong></div></div><div className="signature-inspection"><div className="inspection-heading"><div><span className="section-kicker">SIGNATURE INSPECTION</span><h3>What travels across the channel</h3></div><button className={`tamper-toggle ${tampered ? 'active' : ''}`} onClick={onTamper}><AlertTriangle size={14} /> Simulate signature tampering <span /></button></div><div className="inspection-grid"><SignatureCard identity="Alice" packet={tamperedPackets?.alice} verificationKey={session.trustedKeys.alice} valid={aliceValid} /><SignatureCard identity="Bob" packet={tamperedPackets?.bob} verificationKey={session.trustedKeys.bob} valid={bobValid} /></div></div><div className={`signed-result ${exchangeAccepted ? 'success-result' : tampered ? 'failure-result' : ''}`}><LockKeyhole size={19} /><div><strong>{exchangeAccepted ? 'Trusted keys accepted. Shared secret can be derived.' : tampered ? 'Signature Verification Failed — MITM Detected.' : 'Waiting for signature verification…'}</strong><span>{exchangeAccepted ? `Alice and Bob can safely use shared secret ${result.aliceSecret}. Signatures authenticate the exchange; they do not encrypt messages.` : 'Bob rejects Eve’s modified packet, and Alice rejects Eve’s modified response. The DH values never enter the forged session.'}</span></div></div></motion.section>
+}
+
+function SignatureCard({ identity, packet, verificationKey, valid }) {
+  return <article className="signature-card"><div className="signature-card-head"><span>{identity} / TRUST RECORD</span><span className={valid ? 'signature-status valid-status' : 'signature-status invalid-status'}>{valid ? <Check size={12} /> : <AlertTriangle size={12} />}{valid ? 'VERIFIED' : 'REJECTED'}</span></div><div className="signature-row"><small>DH PUBLIC KEY</small><code>{packet?.publicKey ?? '—'}</code></div><div className="signature-row"><small>SIGNING PUBLIC KEY</small><code>{keyPreview(verificationKey)}</code></div><div className="signature-row"><small>DIGITAL SIGNATURE</small><code>{packetPreview(packet)}</code></div></article>
 }
 
 function MitmSequence({ result, mitm, step, isPlaying, onPlay, onNext, onPrevious, onRestart }) {
